@@ -16,6 +16,7 @@ def test_returns_clear_error_when_api_key_is_missing(monkeypatch) -> None:
         "success": False,
         "markdown": "",
         "error": "OPENAI_API_KEY is not configured.",
+        "error_code": "missing_api_key",
     }
 
 
@@ -38,6 +39,7 @@ def test_generates_structured_markdown_with_responses_api(monkeypatch) -> None:
         "success": True,
         "markdown": "---\ntitle: Example\n---\n\n# Example",
         "error": None,
+        "error_code": None,
     }
     openai.assert_called_once_with(api_key="test-key")
 
@@ -86,5 +88,30 @@ def test_returns_error_when_api_call_fails(monkeypatch) -> None:
     assert result["success"] is False
     assert result["markdown"] == ""
     assert result["error"] == (
-        "OpenAI summarization failed: service unavailable"
+        "OpenAI summarization request failed."
     )
+    assert result["error_code"] is None
+
+
+def test_identifies_insufficient_quota_without_exposing_details(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    client = Mock()
+    client.responses.create.side_effect = RuntimeError(
+        "429 insufficient_quota secret provider details"
+    )
+
+    with patch("app.summarizer.OpenAI", return_value=client):
+        result = summarize_to_markdown(
+            "Example",
+            "https://example.com",
+            "Article text.",
+        )
+
+    assert result == {
+        "success": False,
+        "markdown": "",
+        "error": "OpenAI summarization request failed.",
+        "error_code": "insufficient_quota",
+    }

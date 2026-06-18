@@ -1,13 +1,15 @@
 """Create structured Obsidian Markdown notes with the OpenAI API."""
 
+import logging
 import os
 from datetime import date
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from openai import OpenAI
 
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+logger = logging.getLogger(__name__)
 
 
 class SummaryResult(TypedDict):
@@ -16,6 +18,7 @@ class SummaryResult(TypedDict):
     success: bool
     markdown: str
     error: str | None
+    error_code: NotRequired[str | None]
 
 
 SYSTEM_INSTRUCTIONS = """\
@@ -76,6 +79,24 @@ def _strip_markdown_fence(markdown: str) -> str:
     return cleaned
 
 
+def _openai_error_code(exc: Exception) -> str | None:
+    """Extract a stable OpenAI error code without exposing error details."""
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, str):
+        return code
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error", body)
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            return error["code"]
+
+    if "insufficient_quota" in str(exc):
+        return "insufficient_quota"
+    return None
+
+
 def summarize_to_markdown(title: str, url: str, text: str) -> SummaryResult:
     """Summarize article text as a structured Obsidian Markdown note."""
 
@@ -85,6 +106,7 @@ def summarize_to_markdown(title: str, url: str, text: str) -> SummaryResult:
             "success": False,
             "markdown": "",
             "error": "OPENAI_API_KEY is not configured.",
+            "error_code": "missing_api_key",
         }
 
     try:
@@ -102,16 +124,20 @@ def summarize_to_markdown(title: str, url: str, text: str) -> SummaryResult:
                 "success": False,
                 "markdown": "",
                 "error": "The OpenAI API returned an empty response.",
+                "error_code": "empty_response",
             }
 
         return {
             "success": True,
             "markdown": markdown,
             "error": None,
+            "error_code": None,
         }
     except Exception as exc:
+        logger.exception("OpenAI summarization request failed")
         return {
             "success": False,
             "markdown": "",
-            "error": f"OpenAI summarization failed: {exc}",
+            "error": "OpenAI summarization request failed.",
+            "error_code": _openai_error_code(exc),
         }

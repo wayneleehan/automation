@@ -22,6 +22,7 @@ def test_save_url_runs_full_workflow(tmp_path: Path) -> None:
         "success": True,
         "markdown": "# Example Article\n\nA concise summary.",
         "error": None,
+        "error_code": None,
     }
 
     with (
@@ -97,6 +98,7 @@ def test_save_url_reports_summarizer_failure() -> None:
         "success": False,
         "markdown": "",
         "error": "OPENAI_API_KEY is not configured.",
+        "error_code": "missing_api_key",
     }
 
     with (
@@ -118,3 +120,52 @@ def test_save_url_reports_summarizer_failure() -> None:
             "OPENAI_API_KEY is not configured."
         )
     }
+
+
+def test_save_url_saves_fallback_note_when_quota_is_insufficient(
+    tmp_path: Path,
+) -> None:
+    webpage_text = "A" * 1600
+    webpage = {
+        "url": "https://example.com/article",
+        "title": "Quota Example",
+        "text": webpage_text,
+        "success": True,
+        "error": None,
+    }
+    summary = {
+        "success": False,
+        "markdown": "",
+        "error": "OpenAI summarization request failed.",
+        "error_code": "insufficient_quota",
+    }
+
+    with (
+        patch("app.save_service.fetch_webpage_content", return_value=webpage),
+        patch("app.save_service.summarize_to_markdown", return_value=summary),
+        patch("app.main.settings", SimpleNamespace(vault_path=tmp_path)),
+    ):
+        response = client.post(
+            "/api/save-url",
+            json={"url": "https://example.com/article"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["message"] == (
+        "已儲存原始筆記，但 AI 摘要失敗："
+        "OpenAI API quota/billing 尚未可用。"
+    )
+
+    note = Path(body["path"]).read_text(encoding="utf-8")
+    assert 'title: "Quota Example"' in note
+    assert 'source: "https://example.com/article"' in note
+    assert "created:" in note
+    assert "## LLM Summary Failed" in note
+    assert (
+        "The webpage was saved, but AI summarization failed because the "
+        "OpenAI API quota or billing is not available."
+    ) in note
+    assert "A" * 1500 in note
+    assert "A" * 1501 not in note

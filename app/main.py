@@ -1,5 +1,7 @@
 """FastAPI application entry point."""
 
+import json
+import logging
 from functools import partial
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -13,6 +15,7 @@ from app.save_service import save_url_to_vault
 
 
 app = FastAPI(title=settings.app_name)
+logger = logging.getLogger(__name__)
 
 
 class SaveURLRequest(BaseModel):
@@ -65,30 +68,27 @@ def save_url(request: SaveURLRequest) -> SaveURLResponse:
 async def line_webhook(
     request: Request,
     x_line_signature: str = Header(alias="X-Line-Signature"),
-) -> dict[str, int | str]:
+) -> dict[str, bool]:
     """Receive verified LINE webhook events and reply to text messages."""
 
-    if (
-        not settings.line_channel_secret
-        or not settings.line_channel_access_token
-    ):
-        raise HTTPException(
-            status_code=503,
-            detail="LINE credentials are not configured.",
-        )
-
-    body = (await request.body()).decode("utf-8")
-    save_handler = partial(
-        save_url_to_vault,
-        vault_path=settings.vault_path,
-    )
-    question_handler = lambda question: answer_question_from_vault(
-        question,
-        settings.vault_path,
-    )["answer"]
-
     try:
-        replies = process_line_webhook(
+        if (
+            not settings.line_channel_secret
+            or not settings.line_channel_access_token
+        ):
+            raise RuntimeError("LINE credentials are not configured")
+
+        body = (await request.body()).decode("utf-8")
+        save_handler = partial(
+            save_url_to_vault,
+            vault_path=settings.vault_path,
+        )
+        question_handler = lambda question: answer_question_from_vault(
+            question,
+            settings.vault_path,
+        )["answer"]
+
+        process_line_webhook(
             body,
             x_line_signature,
             settings.line_channel_secret,
@@ -97,14 +97,20 @@ async def line_webhook(
             question_handler,
         )
     except InvalidSignatureError as exc:
+        logger.warning("Rejected LINE webhook with invalid signature")
         raise HTTPException(
             status_code=400,
             detail="Invalid LINE webhook signature.",
         ) from exc
-    except Exception as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        logger.warning("Rejected malformed LINE webhook payload", exc_info=True)
         raise HTTPException(
-            status_code=502,
-            detail=f"LINE webhook processing failed: {exc}",
+            status_code=400,
+            detail="Malformed LINE webhook payload.",
         ) from exc
+    except Exception:
+        logger.exception("LINE webhook processing failed")
+        # Acknowledge valid LINE deliveries to avoid webhook retries.
+        return {"ok": True}
 
-    return {"status": "ok", "replies": replies}
+    return {"ok": True}

@@ -1,5 +1,6 @@
 """LINE Messaging API webhook processing."""
 
+import logging
 from collections.abc import Callable
 
 import certifi
@@ -14,7 +15,10 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 from app.command_parser import parse_command
-from app.save_service import SaveResult
+from app.save_service import QUOTA_WARNING, SaveResult
+
+
+logger = logging.getLogger(__name__)
 
 
 HELP_MESSAGE = (
@@ -41,11 +45,13 @@ def _reply_text(
 
 def _save_reply(result: SaveResult) -> str:
     if result["success"]:
+        if result.get("warning") == "insufficient_quota":
+            return QUOTA_WARNING
         return (
             f"已儲存：{result['title']}\n"
             f"路徑：{result['path']}"
         )
-    return f"儲存失敗：{result['message']}。{result['error'] or ''}".strip()
+    return f"儲存失敗：{result['message']}。請查看伺服器記錄。"
 
 
 def process_line_webhook(
@@ -68,22 +74,37 @@ def process_line_webhook(
         ):
             continue
 
-        parsed = parse_command(event.message.text)
-        if parsed["type"] == "save_url":
-            reply = _save_reply(save_handler(parsed["url"]))
-        elif parsed["type"] == "invalid_command":
-            reply = (
-                "指令格式不正確。請使用：\n"
-                "/紀錄 https://example.com/article"
-            )
-        else:
-            reply = (
-                question_handler(parsed["question"])
-                if question_handler
-                else HELP_MESSAGE
-            )
+        try:
+            parsed = parse_command(event.message.text)
+            if parsed["type"] == "save_url":
+                try:
+                    result = save_handler(parsed["url"])
+                    reply = _save_reply(result)
+                except Exception:
+                    logger.exception("LINE save workflow failed")
+                    reply = "儲存失敗，請稍後再試。"
+            elif parsed["type"] == "invalid_command":
+                reply = (
+                    "指令格式不正確。請使用：\n"
+                    "/紀錄 https://example.com/article"
+                )
+            else:
+                try:
+                    reply = (
+                        question_handler(parsed["question"])
+                        if question_handler
+                        else HELP_MESSAGE
+                    )
+                except Exception:
+                    logger.exception("LINE question workflow failed")
+                    reply = "目前無法回答，請稍後再試。"
 
-        _reply_text(event.reply_token, reply, channel_access_token)
-        reply_count += 1
+            try:
+                _reply_text(event.reply_token, reply, channel_access_token)
+                reply_count += 1
+            except Exception:
+                logger.exception("Failed to send LINE reply")
+        except Exception:
+            logger.exception("Unexpected LINE event processing failure")
 
     return reply_count

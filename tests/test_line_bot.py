@@ -84,6 +84,38 @@ def test_save_command_replies_with_saved_note() -> None:
     )
 
 
+def test_quota_fallback_uses_sanitized_line_reply() -> None:
+    body = _webhook_body()
+    save_handler = Mock(
+        return_value={
+            "success": True,
+            "message": "internal message should not be used",
+            "path": "vault/Inbox/fallback.md",
+            "title": "Example Article",
+            "error": None,
+            "warning": "insufficient_quota",
+        }
+    )
+
+    with patch("app.line_bot._reply_text") as reply:
+        process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            save_handler,
+        )
+
+    reply.assert_called_once_with(
+        "test-reply-token",
+        (
+            "已儲存原始筆記，但 AI 摘要失敗："
+            "OpenAI API quota/billing 尚未可用。"
+        ),
+        CHANNEL_ACCESS_TOKEN,
+    )
+
+
 def test_normal_message_replies_with_help() -> None:
     body = _webhook_body("你可以做什麼？")
 
@@ -141,7 +173,7 @@ def test_invalid_command_replies_with_usage() -> None:
     assert "/紀錄 https://example.com/article" in reply.call_args.args[1]
 
 
-def test_webhook_route_rejects_missing_credentials() -> None:
+def test_webhook_route_acknowledges_missing_credentials() -> None:
     settings = SimpleNamespace(
         line_channel_secret="",
         line_channel_access_token="",
@@ -154,10 +186,8 @@ def test_webhook_route_rejects_missing_credentials() -> None:
             headers={"X-Line-Signature": "signature"},
         )
 
-    assert response.status_code == 503
-    assert response.json() == {
-        "detail": "LINE credentials are not configured."
-    }
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
 
 
 def test_webhook_route_rejects_invalid_signature() -> None:
@@ -200,5 +230,70 @@ def test_webhook_route_processes_valid_request() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "replies": 1}
+    assert response.json() == {"ok": True}
     process.assert_called_once()
+
+
+def test_webhook_verify_with_empty_events_returns_ok() -> None:
+    body = json.dumps({"events": []}, separators=(",", ":"))
+    settings = SimpleNamespace(
+        line_channel_secret=CHANNEL_SECRET,
+        line_channel_access_token=CHANNEL_ACCESS_TOKEN,
+        vault_path="vault",
+    )
+
+    with patch("app.main.settings", settings):
+        response = client.post(
+            "/line/webhook",
+            content=body,
+            headers={"X-Line-Signature": _signature(body)},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_webhook_route_acknowledges_processing_errors() -> None:
+    body = _webhook_body()
+    settings = SimpleNamespace(
+        line_channel_secret=CHANNEL_SECRET,
+        line_channel_access_token=CHANNEL_ACCESS_TOKEN,
+        vault_path="vault",
+    )
+
+    with (
+        patch("app.main.settings", settings),
+        patch(
+            "app.main.process_line_webhook",
+            side_effect=RuntimeError("internal provider details"),
+        ),
+    ):
+        response = client.post(
+            "/line/webhook",
+            content=body,
+            headers={"X-Line-Signature": _signature(body)},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_save_handler_exception_replies_with_short_failure() -> None:
+    body = _webhook_body()
+    save_handler = Mock(side_effect=RuntimeError("full storage error"))
+
+    with patch("app.line_bot._reply_text") as reply:
+        count = process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            save_handler,
+        )
+
+    assert count == 1
+    reply.assert_called_once_with(
+        "test-reply-token",
+        "儲存失敗，請稍後再試。",
+        CHANNEL_ACCESS_TOKEN,
+    )
