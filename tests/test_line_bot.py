@@ -1,0 +1,204 @@
+import base64
+import hashlib
+import hmac
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from fastapi.testclient import TestClient
+
+from app.line_bot import HELP_MESSAGE, process_line_webhook
+from app.main import app
+
+
+CHANNEL_SECRET = "test-channel-secret"
+CHANNEL_ACCESS_TOKEN = "test-access-token"
+client = TestClient(app)
+
+
+def _webhook_body(text: str = "/紀錄 https://example.com/article") -> str:
+    return json.dumps(
+        {
+            "destination": "U1234567890",
+            "events": [
+                {
+                    "type": "message",
+                    "mode": "active",
+                    "timestamp": 1710000000000,
+                    "source": {"type": "user", "userId": "U123"},
+                    "webhookEventId": "01HVTESTEVENT",
+                    "deliveryContext": {"isRedelivery": False},
+                    "replyToken": "test-reply-token",
+                    "message": {
+                        "id": "123456789",
+                        "type": "text",
+                        "quoteToken": "test-quote-token",
+                        "text": text,
+                    },
+                }
+            ],
+        },
+        separators=(",", ":"),
+    )
+
+
+def _signature(body: str, secret: str = CHANNEL_SECRET) -> str:
+    digest = hmac.new(
+        secret.encode(),
+        body.encode(),
+        hashlib.sha256,
+    ).digest()
+    return base64.b64encode(digest).decode()
+
+
+def test_save_command_replies_with_saved_note() -> None:
+    body = _webhook_body()
+    save_handler = Mock(
+        return_value={
+            "success": True,
+            "message": "Saved to Obsidian vault",
+            "path": "vault/Inbox/2026-06-18-example-article.md",
+            "title": "Example Article",
+            "error": None,
+        }
+    )
+
+    with patch("app.line_bot._reply_text") as reply:
+        count = process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            save_handler,
+        )
+
+    assert count == 1
+    save_handler.assert_called_once_with("https://example.com/article")
+    reply.assert_called_once_with(
+        "test-reply-token",
+        (
+            "已儲存：Example Article\n"
+            "路徑：vault/Inbox/2026-06-18-example-article.md"
+        ),
+        CHANNEL_ACCESS_TOKEN,
+    )
+
+
+def test_normal_message_replies_with_help() -> None:
+    body = _webhook_body("你可以做什麼？")
+
+    with patch("app.line_bot._reply_text") as reply:
+        count = process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            Mock(),
+        )
+
+    assert count == 1
+    reply.assert_called_once_with(
+        "test-reply-token",
+        HELP_MESSAGE,
+        CHANNEL_ACCESS_TOKEN,
+    )
+
+
+def test_normal_message_uses_question_handler() -> None:
+    body = _webhook_body("AI Agent 的重點是什麼？")
+    question_handler = Mock(return_value="根據筆記，AI Agent 能使用工具。")
+
+    with patch("app.line_bot._reply_text") as reply:
+        process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            Mock(),
+            question_handler,
+        )
+
+    question_handler.assert_called_once_with("AI Agent 的重點是什麼？")
+    reply.assert_called_once_with(
+        "test-reply-token",
+        "根據筆記，AI Agent 能使用工具。",
+        CHANNEL_ACCESS_TOKEN,
+    )
+
+
+def test_invalid_command_replies_with_usage() -> None:
+    body = _webhook_body("/紀錄")
+
+    with patch("app.line_bot._reply_text") as reply:
+        process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            Mock(),
+        )
+
+    assert "/紀錄 https://example.com/article" in reply.call_args.args[1]
+
+
+def test_webhook_route_rejects_missing_credentials() -> None:
+    settings = SimpleNamespace(
+        line_channel_secret="",
+        line_channel_access_token="",
+    )
+
+    with patch("app.main.settings", settings):
+        response = client.post(
+            "/line/webhook",
+            content="{}",
+            headers={"X-Line-Signature": "signature"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "LINE credentials are not configured."
+    }
+
+
+def test_webhook_route_rejects_invalid_signature() -> None:
+    body = _webhook_body()
+    settings = SimpleNamespace(
+        line_channel_secret=CHANNEL_SECRET,
+        line_channel_access_token=CHANNEL_ACCESS_TOKEN,
+        vault_path="vault",
+    )
+
+    with patch("app.main.settings", settings):
+        response = client.post(
+            "/line/webhook",
+            content=body,
+            headers={"X-Line-Signature": "invalid"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Invalid LINE webhook signature."
+    }
+
+
+def test_webhook_route_processes_valid_request() -> None:
+    body = _webhook_body()
+    settings = SimpleNamespace(
+        line_channel_secret=CHANNEL_SECRET,
+        line_channel_access_token=CHANNEL_ACCESS_TOKEN,
+        vault_path="vault",
+    )
+
+    with (
+        patch("app.main.settings", settings),
+        patch("app.main.process_line_webhook", return_value=1) as process,
+    ):
+        response = client.post(
+            "/line/webhook",
+            content=body,
+            headers={"X-Line-Signature": _signature(body)},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "replies": 1}
+    process.assert_called_once()
