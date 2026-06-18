@@ -10,8 +10,11 @@ from pydantic import BaseModel, HttpUrl
 
 from app.config import settings
 from app.line_bot import process_line_webhook
+from app.note_storage import list_recent_notes, search_stored_notes
 from app.rag import answer_question_from_vault
+from app.raw_service import save_raw_url
 from app.save_service import save_url_to_vault
+from app.scraper import fetch_webpage_content
 
 
 app = FastAPI(title=settings.app_name)
@@ -67,18 +70,37 @@ def save_url(request: SaveURLRequest) -> SaveURLResponse:
 @app.post("/line/webhook")
 async def line_webhook(
     request: Request,
-    x_line_signature: str = Header(alias="X-Line-Signature"),
+    x_line_signature: str | None = Header(
+        default=None,
+        alias="X-Line-Signature",
+    ),
 ) -> dict[str, bool]:
     """Receive verified LINE webhook events and reply to text messages."""
 
     try:
+        body = (await request.body()).decode("utf-8")
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise TypeError("LINE webhook payload must be a JSON object")
+
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise TypeError("LINE webhook events must be a list")
+
+        # LINE's webhook verification request can contain no events and does
+        # not need any downstream processing.
+        if not events:
+            return {"ok": True}
+
         if (
             not settings.line_channel_secret
             or not settings.line_channel_access_token
         ):
             raise RuntimeError("LINE credentials are not configured")
 
-        body = (await request.body()).decode("utf-8")
+        if not x_line_signature:
+            raise InvalidSignatureError("Missing X-Line-Signature header")
+
         save_handler = partial(
             save_url_to_vault,
             vault_path=settings.vault_path,
@@ -95,6 +117,10 @@ async def line_webhook(
             settings.line_channel_access_token,
             save_handler,
             question_handler,
+            fetch_webpage_content,
+            partial(save_raw_url, vault_path=settings.vault_path),
+            partial(list_recent_notes, settings.vault_path),
+            partial(search_stored_notes, vault_path=settings.vault_path),
         )
     except InvalidSignatureError as exc:
         logger.warning("Rejected LINE webhook with invalid signature")

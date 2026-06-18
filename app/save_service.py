@@ -26,6 +26,7 @@ QUOTA_WARNING = (
     "已儲存原始筆記，但 AI 摘要失敗："
     "OpenAI API quota/billing 尚未可用。"
 )
+LLM_FALLBACK_WARNING = "已儲存原始筆記，但目前所有 AI 摘要服務皆不可用。"
 
 
 def _fallback_markdown(title: str, url: str, text: str) -> str:
@@ -73,13 +74,14 @@ def save_url_to_vault(url: str, vault_path: Path) -> SaveResult:
         webpage["text"],
     )
     if not summary["success"]:
-        if summary.get("error_code") == "insufficient_quota":
+        error_code = summary.get("error_code")
+        if error_code in {"insufficient_quota", "all_providers_failed"}:
             markdown = _fallback_markdown(
                 webpage["title"],
                 webpage["url"],
                 webpage["text"],
             )
-            warning = "insufficient_quota"
+            warning = error_code
         else:
             return {
                 "success": False,
@@ -114,7 +116,13 @@ def save_url_to_vault(url: str, vault_path: Path) -> SaveResult:
 
     return {
         "success": True,
-        "message": QUOTA_WARNING if warning else "Saved to Obsidian vault",
+        "message": (
+            QUOTA_WARNING
+            if warning == "insufficient_quota"
+            else LLM_FALLBACK_WARNING
+            if warning == "all_providers_failed"
+            else "Saved to Obsidian vault"
+        ),
         "path": str(saved_path),
         "title": webpage["title"],
         "error": None,

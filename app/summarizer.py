@@ -5,10 +5,16 @@ import os
 from datetime import date
 from typing import NotRequired, TypedDict
 
+import requests
 from openai import OpenAI
 
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "{model}:generateContent"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -19,6 +25,7 @@ class SummaryResult(TypedDict):
     markdown: str
     error: str | None
     error_code: NotRequired[str | None]
+    provider: NotRequired[str | None]
 
 
 SYSTEM_INSTRUCTIONS = """\
@@ -97,47 +104,128 @@ def _openai_error_code(exc: Exception) -> str | None:
     return None
 
 
+def _summarize_with_openai(
+    api_key: str,
+    title: str,
+    url: str,
+    text: str,
+) -> str:
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model=os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
+        instructions=SYSTEM_INSTRUCTIONS,
+        input=_build_prompt(title, url, text),
+        max_output_tokens=2000,
+    )
+    return _strip_markdown_fence(response.output_text)
+
+
+def _summarize_with_gemini(
+    api_key: str,
+    title: str,
+    url: str,
+    text: str,
+) -> str:
+    model = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    response = requests.post(
+        GEMINI_API_URL.format(model=model),
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "system_instruction": {
+                "parts": [{"text": SYSTEM_INSTRUCTIONS}],
+            },
+            "contents": [
+                {
+                    "parts": [
+                        {"text": _build_prompt(title, url, text)},
+                    ]
+                }
+            ],
+            "generationConfig": {"maxOutputTokens": 2000},
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    parts = payload["candidates"][0]["content"]["parts"]
+    output = "".join(
+        part.get("text", "")
+        for part in parts
+        if isinstance(part, dict)
+    )
+    return _strip_markdown_fence(output)
+
+
 def summarize_to_markdown(title: str, url: str, text: str) -> SummaryResult:
-    """Summarize article text as a structured Obsidian Markdown note."""
+    """Summarize with OpenAI first, then Gemini as a fallback."""
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not openai_key and not gemini_key:
         return {
             "success": False,
             "markdown": "",
-            "error": "OPENAI_API_KEY is not configured.",
-            "error_code": "missing_api_key",
+            "error": "No LLM API key is configured.",
+            "error_code": "missing_api_keys",
+            "provider": None,
         }
 
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.responses.create(
-            model=os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
-            instructions=SYSTEM_INSTRUCTIONS,
-            input=_build_prompt(title, url, text),
-            max_output_tokens=2000,
-        )
-        markdown = _strip_markdown_fence(response.output_text)
-
-        if not markdown:
+    openai_error_code: str | None = None
+    if openai_key:
+        try:
+            markdown = _summarize_with_openai(
+                openai_key,
+                title,
+                url,
+                text,
+            )
+            if not markdown:
+                raise ValueError("OpenAI returned an empty response")
             return {
-                "success": False,
-                "markdown": "",
-                "error": "The OpenAI API returned an empty response.",
-                "error_code": "empty_response",
+                "success": True,
+                "markdown": markdown,
+                "error": None,
+                "error_code": None,
+                "provider": "openai",
             }
+        except Exception as exc:
+            openai_error_code = _openai_error_code(exc)
+            logger.exception(
+                "OpenAI summarization failed; trying Gemini fallback"
+            )
 
-        return {
-            "success": True,
-            "markdown": markdown,
-            "error": None,
-            "error_code": None,
-        }
-    except Exception as exc:
-        logger.exception("OpenAI summarization request failed")
-        return {
-            "success": False,
-            "markdown": "",
-            "error": "OpenAI summarization request failed.",
-            "error_code": _openai_error_code(exc),
-        }
+    if gemini_key:
+        try:
+            markdown = _summarize_with_gemini(
+                gemini_key,
+                title,
+                url,
+                text,
+            )
+            if not markdown:
+                raise ValueError("Gemini returned an empty response")
+            return {
+                "success": True,
+                "markdown": markdown,
+                "error": None,
+                "error_code": None,
+                "provider": "gemini",
+            }
+        except Exception:
+            logger.exception("Gemini fallback summarization failed")
+
+    error_code = (
+        "insufficient_quota"
+        if openai_error_code == "insufficient_quota"
+        else "all_providers_failed"
+    )
+    return {
+        "success": False,
+        "markdown": "",
+        "error": "All configured LLM providers failed.",
+        "error_code": error_code,
+        "provider": None,
+    }

@@ -1,8 +1,9 @@
 # Chat-to-Obsidian AI Second Brain
 
 A FastAPI backend that turns links sent through LINE or a local API into
-structured, Obsidian-compatible Markdown notes. It can also answer simple
-questions by searching the saved notes.
+Obsidian-compatible Markdown notes. It includes non-LLM commands for checking
+webpages, saving raw content, listing recent notes, and keyword search, so the
+core demo still works when AI quota is unavailable.
 
 ## Problem statement
 
@@ -25,9 +26,9 @@ For a save command, the backend:
 1. verifies and receives the LINE webhook, or accepts a local API request;
 2. validates and fetches the URL;
 3. extracts readable article content;
-4. asks OpenAI to produce concise Traditional Chinese Markdown;
+4. asks OpenAI, then Gemini, to produce concise Traditional Chinese Markdown;
 5. generates a safe, date-prefixed filename;
-6. saves the note in `vault/Inbox/`; and
+6. saves the note locally, or saves raw notes to GitHub when configured; and
 7. replies with the result.
 
 For a normal LINE message, it searches existing Markdown notes by keyword and
@@ -42,23 +43,25 @@ LINE message ──────────────▶│ POST /line/webhook
                                        │ signature verification
                                        ▼
                                 Command parser
-                                 │           │
-                    /紀錄 [URL]  │           │ normal question
-                                 ▼           ▼
-Local API ───────────────▶ Save service   Keyword note search
-POST /api/save-url              │           │
-                                ▼           ▼
-                         Web scraper     Grounded LLM answer
-                    Trafilatura → BS4        │
-                                │             └──▶ LINE reply
-                                ▼
-                         OpenAI summarizer
-                                │
-                                ▼
-                         Markdown writer
-                                │
-                                ▼
-                         vault/Inbox/*.md
+                      ┌──────────┼─────────────┐
+                      ▼          ▼             ▼
+                /紀錄 URL   Non-LLM tools   Normal question
+                      │      /raw /check      │
+Local API ──────▶ Save service  /最近 /搜尋    ▼
+POST /api/save-url     │          │       Grounded Q&A
+                      ▼          │
+                 Web scraper ◀────┘
+               Trafilatura → BS4
+                      │
+                      ▼
+              OpenAI → Gemini
+                      │ failures
+                      ▼
+               Raw-note fallback
+                      │
+                ┌─────┴─────┐
+                ▼           ▼
+          Local vault     GitHub
 ```
 
 ## Tech stack
@@ -67,6 +70,8 @@ POST /api/save-url              │           │
 - FastAPI and Uvicorn
 - LINE Bot SDK v3
 - OpenAI Responses API
+- Gemini `generateContent` API fallback
+- GitHub Contents API
 - Trafilatura, Requests, and Beautiful Soup
 - Pydantic
 - pytest
@@ -83,6 +88,9 @@ app/
 ├── scraper.py          # Web fetching and text extraction
 ├── summarizer.py       # OpenAI Markdown generation
 ├── markdown_writer.py  # Safe vault file creation
+├── raw_service.py      # Non-LLM raw-note workflow
+├── github_writer.py    # GitHub Contents API writes
+├── note_storage.py     # GitHub/local listing and search
 ├── line_bot.py         # LINE webhook processing and replies
 └── rag.py              # Keyword search and grounded note Q&A
 
@@ -114,8 +122,15 @@ Never put real credentials in `.env.example` or commit `.env`.
 | `PORT` | No | Local server port |
 | `OPENAI_API_KEY` | Save/Q&A | OpenAI API authentication |
 | `OPENAI_MODEL` | No | Model used for summaries and answers |
+| `GEMINI_API_KEY` | No | Gemini fallback authentication for summaries |
+| `GEMINI_MODEL` | No | Gemini fallback model |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE | Sends LINE reply messages |
 | `LINE_CHANNEL_SECRET` | LINE | Verifies LINE webhook signatures |
+| `GITHUB_TOKEN` | GitHub | GitHub token with repository content access |
+| `GITHUB_OWNER` | GitHub | Repository owner or organization |
+| `GITHUB_REPO` | GitHub | Repository name |
+| `GITHUB_BRANCH` | GitHub | Target branch, usually `main` |
+| `GITHUB_NOTES_DIR` | GitHub | Note directory, usually `Inbox` |
 | `VAULT_PATH` | No | Vault root; defaults to `vault` |
 
 If any credential was previously placed in a shared file, terminal output, or
@@ -173,8 +188,25 @@ Confirm that the Markdown file exists:
 ls -la vault/Inbox
 ```
 
-If the API key is missing, the endpoint returns a controlled HTTP 502 error
-and does not create a partial note.
+If OpenAI fails, Gemini is attempted. If all configured AI providers fail
+because OpenAI quota is unavailable, the save workflow creates a fallback note
+containing the extracted webpage text.
+
+## LINE commands
+
+| Command | Description | Requires OpenAI |
+| --- | --- | --- |
+| `/指令` | Show all commands | No |
+| `/help` | Show all commands | No |
+| `/status` | Show configuration presence without revealing secrets | No |
+| `/紀錄 URL` | Save with AI summary when available; raw fallback otherwise | Optional |
+| `/raw URL` | Save extracted webpage content without AI | No |
+| `/check URL` | Check whether the server can fetch a webpage | No |
+| `/最近` | List up to five recent notes | No |
+| `/搜尋 keyword` | Search notes with short matching snippets | No |
+
+`/status` checks configuration only. It does not call OpenAI and does not prove
+that billing or quota is currently available.
 
 ## Connect the LINE webhook
 
@@ -195,8 +227,23 @@ and does not create a partial note.
    /紀錄 https://example.com
    ```
 
-The webhook rejects missing credentials with HTTP 503 and invalid LINE
-signatures with HTTP 400. Do not disable signature verification.
+Empty LINE verification requests return HTTP 200 with `{"ok":true}`. Valid
+deliveries are acknowledged with HTTP 200 even if a scraper, AI, storage, or
+reply operation fails, which prevents repeated webhook retries. Non-empty
+requests still require a valid LINE signature; malformed payloads and invalid
+signatures return HTTP 400.
+
+## Storage behavior
+
+`/raw`, `/最近`, and `/搜尋` select storage as follows:
+
+1. If all five `GITHUB_*` variables are configured, use the GitHub repository.
+2. Otherwise, use `VAULT_PATH/Inbox` on the local filesystem.
+
+GitHub is recommended for Render because Render's default filesystem is
+ephemeral. If you intentionally use local files on Render, attach a persistent
+disk and point `VAULT_PATH` at its mount path. Render storage does not directly
+write into a Vault folder on your Mac.
 
 ## Q&A behavior
 
@@ -227,36 +274,38 @@ pytest -q
 The tests mock external OpenAI and LINE operations. The scraper also has a
 separate live smoke test documented in `PROJECT_PLAN.md`.
 
-## Demo flow
+## Demo flow without LLM quota
 
 Recommended presentation sequence:
 
-1. Show an empty or known `vault/Inbox/` folder.
-2. Start FastAPI and show the successful `/health` response.
-3. Send `/紀錄 https://example.com` through LINE.
-4. Show the LINE success reply.
-5. Open the generated Markdown note in Obsidian and point out:
-   - YAML frontmatter;
-   - Traditional Chinese summary;
-   - key points and related concepts; and
-   - source URL.
-6. Ask a normal LINE question about the saved note.
-7. Show the answer grounded in the vault content.
+1. Send `/指令` to show the supported commands.
+2. Send `/status` to show configuration without exposing secrets.
+3. Send `/check https://example.com` to prove the scraper works.
+4. Send `/raw https://example.com` to save without AI.
+5. Send `/最近` to list the new note.
+6. Send `/搜尋 Example` to retrieve it with a snippet.
 
 If a public LINE webhook is unavailable during the presentation, demonstrate
 the same save workflow with `POST /api/save-url`.
+
+Optional AI portion:
+
+1. Send `/紀錄 URL`.
+2. Show OpenAI summary, Gemini fallback, or raw-note fallback.
 
 ## Limitations
 
 - Web extraction quality varies across JavaScript-heavy, paywalled, or
   access-restricted sites.
-- Summary and Q&A require an available OpenAI API key and network access.
+- AI summary prefers OpenAI and falls back to Gemini; both still require
+  configured keys, quota, and network access.
+- Non-LLM commands continue to work without any AI key.
 - Q&A uses keyword scoring, not embeddings or semantic vector search.
 - There is no authentication, database, multi-user isolation, or rate limit.
 - LINE webhook processing is synchronous; long article processing may approach
   webhook timeout limits.
 - Local vault files are not automatically synchronized to another device.
-- Local disk may be ephemeral on some hosting platforms.
+- Render's default local disk is ephemeral; use GitHub or a persistent disk.
 - Filename transliteration is intentionally conservative; titles containing no
   ASCII filename characters use `untitled`.
 

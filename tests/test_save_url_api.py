@@ -23,6 +23,7 @@ def test_save_url_runs_full_workflow(tmp_path: Path) -> None:
         "markdown": "# Example Article\n\nA concise summary.",
         "error": None,
         "error_code": None,
+        "provider": "openai",
     }
 
     with (
@@ -97,8 +98,9 @@ def test_save_url_reports_summarizer_failure() -> None:
     summary = {
         "success": False,
         "markdown": "",
-        "error": "OPENAI_API_KEY is not configured.",
-        "error_code": "missing_api_key",
+        "error": "No LLM API key is configured.",
+        "error_code": "missing_api_keys",
+        "provider": None,
     }
 
     with (
@@ -117,7 +119,7 @@ def test_save_url_reports_summarizer_failure() -> None:
     assert response.json() == {
         "detail": (
             "Could not summarize webpage: "
-            "OPENAI_API_KEY is not configured."
+            "No LLM API key is configured."
         )
     }
 
@@ -136,8 +138,9 @@ def test_save_url_saves_fallback_note_when_quota_is_insufficient(
     summary = {
         "success": False,
         "markdown": "",
-        "error": "OpenAI summarization request failed.",
+        "error": "All configured LLM providers failed.",
         "error_code": "insufficient_quota",
+        "provider": None,
     }
 
     with (
