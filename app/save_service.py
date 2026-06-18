@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
+from app.github_writer import get_github_settings, save_markdown_to_github
 from app.markdown_writer import save_markdown
 from app.scraper import fetch_webpage_content
 from app.summarizer import summarize_to_markdown
@@ -20,6 +21,7 @@ class SaveResult(TypedDict):
     title: str
     error: str | None
     warning: NotRequired[str | None]
+    html_url: NotRequired[str]
 
 
 QUOTA_WARNING = (
@@ -96,12 +98,25 @@ def save_url_to_vault(url: str, vault_path: Path) -> SaveResult:
         warning = None
 
     try:
-        saved_path = save_markdown(
-            webpage["title"],
-            markdown,
-            output_dir=vault_path / "Inbox",
-        )
-    except OSError as exc:
+        github = get_github_settings()
+        if github:
+            saved = save_markdown_to_github(
+                webpage["title"],
+                markdown,
+                **github,
+            )
+            saved_path = saved["path"]
+            html_url = saved["html_url"]
+        else:
+            saved_path = str(
+                save_markdown(
+                    webpage["title"],
+                    markdown,
+                    output_dir=vault_path / "Inbox",
+                )
+            )
+            html_url = ""
+    except Exception as exc:
         logger.exception(
             "Failed to save Markdown note to configured vault/storage"
         )
@@ -123,8 +138,9 @@ def save_url_to_vault(url: str, vault_path: Path) -> SaveResult:
             if warning == "all_providers_failed"
             else "Saved to Obsidian vault"
         ),
-        "path": str(saved_path),
+        "path": saved_path,
         "title": webpage["title"],
         "error": None,
         "warning": warning,
+        "html_url": html_url,
     }

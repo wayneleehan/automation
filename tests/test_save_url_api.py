@@ -57,6 +57,61 @@ def test_save_url_runs_full_workflow(tmp_path: Path) -> None:
     )
 
 
+def test_save_url_uses_github_when_fully_configured(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name, value in {
+        "GITHUB_TOKEN": "token",
+        "GITHUB_OWNER": "wayneleehan",
+        "GITHUB_REPO": "automation",
+        "GITHUB_BRANCH": "main",
+        "GITHUB_NOTES_DIR": "Inbox",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    webpage = {
+        "url": "https://example.com/article",
+        "title": "GitHub Article",
+        "text": "Readable article text.",
+        "success": True,
+        "error": None,
+    }
+    summary = {
+        "success": True,
+        "markdown": "# GitHub Article\n\nSummary.",
+        "error": None,
+        "error_code": None,
+        "provider": "openai",
+    }
+
+    with (
+        patch("app.save_service.fetch_webpage_content", return_value=webpage),
+        patch("app.save_service.summarize_to_markdown", return_value=summary),
+        patch(
+            "app.save_service.save_markdown_to_github",
+            return_value={
+                "path": "Inbox/2026-06-18-github-article.md",
+                "html_url": (
+                    "https://github.com/wayneleehan/automation/"
+                    "blob/main/Inbox/2026-06-18-github-article.md"
+                ),
+            },
+        ) as github_save,
+        patch("app.save_service.save_markdown") as local_save,
+        patch("app.main.settings", SimpleNamespace(vault_path=tmp_path)),
+    ):
+        response = client.post(
+            "/api/save-url",
+            json={"url": "https://example.com/article"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["path"] == "Inbox/2026-06-18-github-article.md"
+    github_save.assert_called_once()
+    local_save.assert_not_called()
+
+
 def test_save_url_rejects_invalid_url() -> None:
     response = client.post("/api/save-url", json={"url": "not-a-url"})
 

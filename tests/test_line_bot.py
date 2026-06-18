@@ -85,6 +85,38 @@ def test_save_command_replies_with_saved_note() -> None:
     )
 
 
+def test_save_command_replies_with_github_url() -> None:
+    body = _webhook_body()
+    save_handler = Mock(
+        return_value={
+            "success": True,
+            "message": "Saved to Obsidian vault",
+            "path": "Inbox/example.md",
+            "html_url": "https://github.com/owner/repo/blob/main/Inbox/example.md",
+            "title": "Example Article",
+            "error": None,
+        }
+    )
+
+    with patch("app.line_bot._reply_text") as reply:
+        process_line_webhook(
+            body,
+            _signature(body),
+            CHANNEL_SECRET,
+            CHANNEL_ACCESS_TOKEN,
+            save_handler,
+        )
+
+    reply.assert_called_once_with(
+        "test-reply-token",
+        (
+            "已儲存：Example Article\n"
+            "GitHub：https://github.com/owner/repo/blob/main/Inbox/example.md"
+        ),
+        CHANNEL_ACCESS_TOKEN,
+    )
+
+
 def test_quota_fallback_uses_sanitized_line_reply() -> None:
     body = _webhook_body()
     save_handler = Mock(

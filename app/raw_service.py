@@ -1,12 +1,11 @@
 """Save webpage text without calling an LLM."""
 
 import logging
-import os
 from datetime import date
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
-from app.github_writer import save_markdown_to_github
+from app.github_writer import get_github_settings, save_markdown_to_github
 from app.markdown_writer import save_markdown
 from app.scraper import fetch_webpage_content
 
@@ -51,17 +50,6 @@ type: raw-web-clip
 """
 
 
-def _github_settings() -> dict[str, str] | None:
-    values = {
-        "token": os.getenv("GITHUB_TOKEN", "").strip(),
-        "owner": os.getenv("GITHUB_OWNER", "").strip(),
-        "repo": os.getenv("GITHUB_REPO", "").strip(),
-        "branch": os.getenv("GITHUB_BRANCH", "").strip(),
-        "notes_dir": os.getenv("GITHUB_NOTES_DIR", "").strip(),
-    }
-    return values if all(values.values()) else None
-
-
 def save_raw_url(url: str, vault_path: Path) -> RawSaveResult:
     """Fetch and save one raw webpage using GitHub or the local vault."""
 
@@ -81,7 +69,7 @@ def save_raw_url(url: str, vault_path: Path) -> RawSaveResult:
     )
 
     try:
-        github = _github_settings()
+        github = get_github_settings()
         if github:
             saved = save_markdown_to_github(
                 webpage["title"],

@@ -1,6 +1,7 @@
 """Save Markdown notes with the GitHub Contents API."""
 
 import base64
+import os
 from datetime import date
 from pathlib import PurePosixPath
 from typing import TypedDict
@@ -18,6 +19,19 @@ GITHUB_API = "https://api.github.com"
 class GitHubSaveResult(TypedDict):
     path: str
     html_url: str
+
+
+def get_github_settings() -> dict[str, str] | None:
+    """Return GitHub storage settings only when fully configured."""
+
+    values = {
+        "token": os.getenv("GITHUB_TOKEN", "").strip(),
+        "owner": os.getenv("GITHUB_OWNER", "").strip(),
+        "repo": os.getenv("GITHUB_REPO", "").strip(),
+        "branch": os.getenv("GITHUB_BRANCH", "").strip(),
+        "notes_dir": os.getenv("GITHUB_NOTES_DIR", "").strip(),
+    }
+    return values if all(values.values()) else None
 
 
 def save_markdown_to_github(
@@ -68,7 +82,7 @@ def save_markdown_to_github(
         endpoint,
         headers=headers,
         json={
-            "message": f"Add raw web clip: {title}",
+            "message": f"Add web clip: {title}",
             "content": base64.b64encode(content.encode("utf-8")).decode(),
             "branch": branch,
         },

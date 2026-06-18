@@ -105,6 +105,11 @@ def _save_reply(result: SaveResult) -> str:
             return QUOTA_WARNING
         if result.get("warning") == "all_providers_failed":
             return LLM_FALLBACK_WARNING
+        if result.get("html_url"):
+            return (
+                f"已儲存：{result['title']}\n"
+                f"GitHub：{result['html_url']}"
+            )
         return (
             f"已儲存：{result['title']}\n"
             f"路徑：{result['path']}"

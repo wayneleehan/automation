@@ -235,7 +235,7 @@ signatures return HTTP 400.
 
 ## Storage behavior
 
-`/raw`, `/最近`, and `/搜尋` select storage as follows:
+`/紀錄`, `/raw`, `/最近`, and `/搜尋` select storage as follows:
 
 1. If all five `GITHUB_*` variables are configured, use the GitHub repository.
 2. Otherwise, use `VAULT_PATH/Inbox` on the local filesystem.
@@ -244,6 +244,20 @@ GitHub is recommended for Render because Render's default filesystem is
 ephemeral. If you intentionally use local files on Render, attach a persistent
 disk and point `VAULT_PATH` at its mount path. Render storage does not directly
 write into a Vault folder on your Mac.
+
+For this repository, the suggested Render values are:
+
+```env
+GITHUB_OWNER=wayneleehan
+GITHUB_REPO=automation
+GITHUB_BRANCH=main
+GITHUB_NOTES_DIR=Inbox
+GITHUB_TOKEN=your-fine-grained-token
+```
+
+Create the fine-grained token with access only to `wayneleehan/automation` and
+grant repository **Contents: Read and write** permission. Store it only in
+Render's environment variables, never in `.env.example` or Git.
 
 ## Q&A behavior
 
